@@ -1,77 +1,59 @@
-import re
-from difflib import SequenceMatcher
+import difflib
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+import logging
 
-# Sample Internal Corpus
-CORPUS = [
-    {"id": "doc1", "title": "Intro to ML", "content": "Machine learning algorithms can identify patterns in large datasets. This is highly useful for predictive analytics."},
-    {"id": "doc2", "title": "Wikipedia: AI", "content": "Artificial intelligence is intelligence demonstrated by machines, as opposed to the natural intelligence displayed by animals including humans."},
-    {"id": "doc3", "title": "Data Science Basics", "content": "A neural network is a network or circuit of biological neurons, or, in a modern sense, an artificial neural network."},
-    {"id": "doc4", "title": "SEO Guide", "content": "Search engine optimization represents the process of improving the quality and quantity of website traffic to a website or a web page from search engines."}
-]
+logger = logging.getLogger(__name__)
 
-def chunk_text(text, chunk_size=3):
-    """Splits text into chunks of sentences."""
-    sentences = re.split(r'(?<=[.!?]) +', text)
-    chunks = []
-    for i in range(0, len(sentences), chunk_size):
-        chunks.append(" ".join(sentences[i:i+chunk_size]))
-    return chunks
+def calculate_tfidf_similarity(text1: str, text2: str) -> float:
+    """
+    Calculates TF-IDF cosine similarity between exactly two strings.
+    Returns value in [0.0, 1.0].
+    """
+    try:
+        vectorizer = TfidfVectorizer(stop_words='english')
+        tfidf_matrix = vectorizer.fit_transform([text1, text2])
+        score = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+        # Clamp to [0, 1]
+        return max(0.0, min(1.0, float(score)))
+    except ValueError:
+        # Happens if strings only contain stop words or are empty
+        return 0.0
 
-class PlagiarismEngine:
-    def __init__(self):
-        # Build TF-IDF for the corpus
-        self.vectorizer = TfidfVectorizer()
-        self.corpus_texts = [doc['content'] for doc in CORPUS]
-        if self.corpus_texts:
-            self.tfidf_matrix = self.vectorizer.fit_transform(self.corpus_texts)
-            
-    def analyze(self, text: str):
-        chunks = chunk_text(text, 2)
-        matches = []
+def calculate_fuzzy_similarity(text1: str, text2: str) -> float:
+    """
+    Calculates raw sequence matching ratio.
+    Returns value in [0.0, 1.0].
+    """
+    return difflib.SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
+
+def evaluate_match_signals(query_chunk: str, matched_chunk: str, semantic_similarity: float):
+    """
+    Combines three signals (Semantic, TF-IDF, Fuzzy) to categorize and weight the match.
+    
+    Returns:
+        tuple(float, str) -> (combined_similarity_score [0,1], match_type)
+    """
+    
+    tfidf_sim = calculate_tfidf_similarity(query_chunk, matched_chunk)
+    fuzzy_sim = calculate_fuzzy_similarity(query_chunk, matched_chunk)
+    
+    # Is it basically exact?
+    if query_chunk.strip().lower() in matched_chunk.strip().lower() or matched_chunk.strip().lower() in query_chunk.strip().lower():
+        # High confidence exact
+        return 1.0, "Exact"
         
-        total_similarity = 0
+    if fuzzy_sim >= 0.95:
+        return max(fuzzy_sim, semantic_similarity), "Exact"
         
-        for chunk in chunks:
-            if not chunk.strip(): continue
-            
-            # Semantic/Fuzzy Match via TFIDF
-            vec = self.vectorizer.transform([chunk])
-            sim_scores = cosine_similarity(vec, self.tfidf_matrix)[0]
-            
-            best_idx = sim_scores.argmax()
-            best_score = sim_scores[best_idx]
-            
-            # Exact Match approximation via difflib
-            best_doc_text = self.corpus_texts[best_idx]
-            exact_ratio = SequenceMatcher(None, chunk.lower(), best_doc_text.lower()).ratio()
-            
-            # Combine thresholds
-            if best_score > 0.3 or exact_ratio > 0.6:
-                match_type = "exact" if exact_ratio > 0.8 else ("fuzzy" if exact_ratio > 0.6 else "semantic")
-                score = max(best_score, exact_ratio)
-                
-                matches.append({
-                    "id": f"match-{len(matches)+1}",
-                    "text_segment": chunk,
-                    "matched_text": best_doc_text[:200] + "...",
-                    "similarity_score": round(score * 100, 1),
-                    "match_type": match_type,
-                    "source_name": CORPUS[best_idx]["title"]
-                })
-                total_similarity += score
-                
-        # Calculate overall percentage based on matched chunks
-        if len(chunks) == 0:
-            return 0.0, 100.0, [], 0
-            
-        coverage = len(matches) / len(chunks) if chunks else 0
-        avg_score = total_similarity / len(matches) if matches else 0
+    if fuzzy_sim >= 0.70:
+        # Weighted combination favoring the fuzzy match
+        combined = (0.50 * fuzzy_sim) + (0.35 * semantic_similarity) + (0.15 * tfidf_sim)
+        return min(combined, 1.0), "Fuzzy"
         
-        overall_similarity = round(coverage * avg_score * 100, 1)
-        originality = round(100.0 - overall_similarity, 1)
-        
-        unique_sources = len(set([m["source_name"] for m in matches]))
-        
-        return overall_similarity, originality, matches, unique_sources
+    # Otherwise it's semantic.
+    # If the vector model thinks it's a semantic match, we base the score heavily on that,
+    # but use tfidf/fuzzy to slightly adjust it (penalize if completely textually unrelated, OR reward if there's some shared vocab).
+    combined = (0.75 * semantic_similarity) + (0.15 * tfidf_sim) + (0.10 * fuzzy_sim)
+    
+    return min(combined, 1.0), "Semantic"
