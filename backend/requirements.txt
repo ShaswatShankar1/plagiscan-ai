@@ -1,0 +1,14 @@
+fastapi[standard]
+uvicorn
+sqlalchemy
+psycopg2-binary
+pydantic
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+alembic
+scikit-learn
+httpx
+pdfplumber
+python-docx
+pgvector
